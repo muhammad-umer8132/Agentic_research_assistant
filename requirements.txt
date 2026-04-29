@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+aiohttp
+duckduckgo_search
+trafilatura
+httpx
+python-dotenv
+pydantic-settings
+playwright
