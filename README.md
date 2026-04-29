@@ -1,379 +1,162 @@
-# 🤖 Agentic Research Assistant
-
-An intelligent AI-powered research assistant that aggregates information from multiple search engines, scrapes web content in parallel using a browser pool, and provides comprehensive answers with cited sources.
-
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-18+-61DAFB.svg?logo=react)](https://reactjs.org)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
----
-
-## 🌟 Features
-
-- **Multi-Engine Search**: Queries Google, Bing, DuckDuckGo, Yahoo simultaneously
-- **Parallel Browser Pool**: 3 concurrent browser instances for ultra-fast scraping
-- **Smart Fallback Strategy**: aiohttp → curl_cffi → Selenium (layered approach)
-- **Real-time Streaming**: SSE-based response streaming for instant feedback
-- **Right-Side Sources Panel**: Card-based source display in a knowledge panel layout
-- **Redis Caching**: Result caching for faster repeat queries
-- **Markdown Rendering**: Full markdown support with headings, lists, bold/italic
-
----
-
-## 📁 Project Structure
-
-```
-Agentic_research_assistant/
-├── main.py              # FastAPI backend + LLM integration
-├── scraper.py           # URL scraping with 3-layer fallback
-├── selenium_scraper.py  # Browser pool + UniversalScraper
-├── run.py              # Entry point
-├── requirements.txt    # Python dependencies
-├── .env.example        # Environment template
-│
-└── frontend/           # React + Vite frontend
-    ├── src/
-    │   ├── App.jsx           # Main chat + sources sidebar
-    │   ├── App.css           # Layout styling
-    │   ├── components/
-    │   │   ├── MessageBubble.jsx    # Chat messages + markdown
-    │   │   └── ...
-    │   └── hooks/
-    │       └── useSSE.js      # Server-Sent Events hook
-    ├── package.json
-    └── vite.config.js
-```
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.9+
-- Node.js 18+
-- Redis (optional, for caching)
-
-### 1. Clone & Setup
-```bash
-git clone https://github.com/muhammad-umer8132/Agentic_research_assistant.git
-cd Agentic_research_assistant
-```
-
-### 2. Backend Setup
-```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your LLM_BASE_URL and LLM_MODEL
-```
-
-### 3. Frontend Setup
-```bash
-cd frontend
-npm install
-npm run build
-cd ..
-```
-
-### 4. Run
-```bash
-python run.py
-```
-
-Access at: `http://localhost:8001`
-
----
-
-## ⚙️ Environment Variables
-
-```env
-LLM_BASE_URL=http://localhost:1234/v1  # Your LLM API endpoint
-LLM_MODEL=meta-llama-3.1-8b-instruct   # Model name
-REDIS_URL=redis://localhost:6379       # Optional: Redis caching
-```
-
----
-
 ## 📊 System Architecture
 
 ### Non-Technical Overview (For Everyone)
 
 ```mermaid
-flowchart TB
-    subgraph "What You See"
-        UI[🌐 Web Interface]
-        Chat[💬 Chat Area]
-        Sources[📚 Sources Panel]
-    end
+flowchart LR
+    Start([👤 User]) -->|Asks Question| InputBox["💬 Type Your Question"]
     
-    subgraph "Behind the Scenes"
-        Search[🔍 Search Multiple Engines]
-        Scrape[⚡ Fast Web Scraping]
-        Think[🧠 AI Processing]
-    end
+    InputBox -->|Click Search| CheckCache{{"❓ Have we<br/>answered this<br/>before?"}}
     
-    subgraph "The Magic"
-        Pool[🎪 3 Browser Pool]
-        Cache[💾 Smart Cache]
-        Stream[📡 Real-time Stream]
-    end
+    CheckCache -->|Yes| UseCached["⚡ Get Answer<br/>from Memory"]
+    CheckCache -->|No| MultiSearch["🔍 Search Multiple<br/>Engines<br/>Google, Bing,<br/>DuckDuckGo, Yahoo"]
+    
+    MultiSearch -->|Collect URLs| FetchWebsites["🌐 Fast Fetch<br/>from Websites<br/>3 Browsers<br/>Working in Parallel"]
+    
+    FetchWebsites -->|Extract Content| AIThinks["🧠 AI Reads Content<br/>& Writes Answer"]
+    
+    UseCached -->|Or| AIThinks
+    
+    AIThinks -->|Generate| StreamAnswer["📡 Stream Answer<br/>Word by Word"]
+    
+    StreamAnswer -->|Display| ChatUI["💬 Show in<br/>Chat Bubble"]
+    StreamAnswer -->|Display| SourcesUI["📚 Show Sources<br/>on Right Side"]
+    
+    ChatUI -->|Result| End(["👤 User Sees<br/>Complete Answer<br/>with Sources"])
+    SourcesUI -->|Result| End
+    
+    FetchWebsites -->|Save for Later| Memory["💾 Remember<br/>for Next Time"]
 
-    User([👤 You]) -->|Ask Question| UI
-    UI --> Search
-    Search --> Pool
-    Pool --> Scrape
-    Scrape --> Think
-    Think --> Stream
-    Stream -->|Live Response| Chat
-    Stream -->|Show Sources| Sources
-    Cache -->|Skip if Known| Search
+    style Start fill:#b3e5fc
+    style InputBox fill:#81d4fa
+    style CheckCache fill:#ffd54f
+    style UseCached fill:#a5d6a7
+    style MultiSearch fill:#ce93d8
+    style FetchWebsites fill:#ffab91
+    style AIThinks fill:#fff59d
+    style StreamAnswer fill:#b2dfdb
+    style ChatUI fill:#c5e1a5
+    style SourcesUI fill:#f8bbd0
+    style End fill:#a1887f
+    style Memory fill:#c8e6c9
 ```
 
-**How it works (Simple):**
+**User Journey Summary:**
 1. **You ask** a question in the web interface
-2. **We search** Google, Bing, DuckDuckGo, Yahoo at the same time
-3. **We scrape** the top websites using 3 browsers working together
-4. **AI reads** all the content and writes a comprehensive answer
-5. **You see** the response appear word-by-word, with sources on the right
+2. **System checks** if we've answered this before (instant if cached)
+3. **Multiple searches** happen simultaneously across Google, Bing, DuckDuckGo, Yahoo
+4. **Fast fetching** from top results using 3 parallel browsers
+5. **AI processes** all content and generates comprehensive answer
+6. **Stream displays** word-by-word with sources visible on the right
+7. **Results cached** for future queries
 
 ---
 
-### Technical Deep Dive
+### Technical Deep Dive (For Developers)
 
 ```mermaid
-flowchart TB
-    subgraph "Frontend [React + Vite]"
-        A[User Query]
-        B[useSSE Hook]
-        C[MessageBubble]
-        D[Sources Sidebar]
-        E[Markdown Parser]
+flowchart TD
+    subgraph Frontend["🎨 Frontend Layer [React + Vite]"]
+        UI["User Query Input"]
+        SSEHook["useSSE Hook<br/>SSE Connection"]
+        MessageBubble["MessageBubble Component<br/>Markdown Rendering"]
+        SourcesPanel["Sources Panel<br/>Card Layout"]
     end
 
-    subgraph "Backend [FastAPI]"
-        F[/search Endpoint\]
-        G[Cache Check]
-        H[Parallel Search]
-        I[LLM Streamer]
+    subgraph FastAPIMeta["⚡ FastAPI Backend"]
+        SearchEndpoint["/search Endpoint<br/>Query Handler"]
+        CacheCheck["Cache Check<br/>Redis Lookup"]
+        ParallelSearch["Parallel Search<br/>asyncio.gather"]
     end
 
-    subgraph "Search Layer"
-        S1[search_google]
-        S2[search_bing]
-        S3[search_ddg]
-        S4[search_yahoo]
+    subgraph SearchEngines["🔍 Search Layer"]
+        DDG["DuckDuckGo<br/>text search"]
+        Google["Google Search<br/>Selenium JS Render"]
+        Yahoo["Yahoo Search<br/>httpx + redirect"]
     end
 
-    subgraph "Scraping Layer [3-Tier]"
-        T1["Tier 1: aiohttp<br/>(4s timeout)"]
-        T2["Tier 2: curl_cffi<br/>(8s TLS impersonation)"]
-        T3["Tier 3: BrowserPool<br/>(3 parallel browsers)"]
+    subgraph ScraperTier["📄 3-Tier Scraper"]
+        Layer1["Tier 1: aiohttp<br/>Timeout: 4s<br/>Static Sites"]
+        Layer2["Tier 2: curl_cffi<br/>Timeout: 8s<br/>TLS Impersonation"]
+        Layer3["Tier 3: Browser Pool<br/>Timeout: 8s<br/>JS Rendering"]
     end
 
-    subgraph "Browser Pool"
-        P1[Browser 1]
-        P2[Browser 2]
-        P3[Browser 3]
-        PS[Semaphore-based<br/>Acquisition]
+    subgraph BrowserPoolSubgraph["🎪 Browser Pool [3 Instances]"]
+        Browser1["Browser 1<br/>SeleniumBase UC"]
+        Browser2["Browser 2<br/>SeleniumBase UC"]
+        Browser3["Browser 3<br/>SeleniumBase UC"]
+        Semaphore["Semaphore<br/>Max: 3"]
     end
 
-    A -->|POST /search| F
-    F -->|Check| G
-    G -->|Cache Miss| H
-    G -->|Cache Hit| I
+    subgraph ContentProcessing["🧠 Content Processing"]
+        Trafilatura["Trafilatura<br/>Content Extraction"]
+        TextClean["Text Cleanup<br/>2000 char limit"]
+    end
+
+    subgraph LLMProcessing["🤖 LLM Integration"]
+        PromptBuilder["Prompt Builder<br/>Citation Format"]
+        GemmaAPI["Gemma API Call<br/>httpx Streaming"]
+        TokenStream["Token Stream<br/>SSE Events"]
+    end
+
+    subgraph CacheLayer["💾 Redis Cache"]
+        RedisStore["Redis SETEX<br/>TTL: 3600s"]
+        RedisFetch["Redis GET<br/>Key: search:query"]
+    end
+
+    UI -->|POST /search| SearchEndpoint
+    SearchEndpoint -->|Check| CacheCheck
+    CacheCheck -->|Cache Hit| TokenStream
+    CacheCheck -->|Cache Miss| ParallelSearch
     
-    H -->|Asyncio.gather| S1
-    H --> S2
-    H --> S3
-    H --> S4
+    ParallelSearch -->|asyncio.gather| DDG
+    ParallelSearch -->|asyncio.gather| Google
+    ParallelSearch -->|asyncio.gather| Yahoo
     
-    S1 & S2 & S3 & S4 -->|URLs| T1
-    T1 -->|Fail| T2
-    T2 -->|Fail| T3
+    DDG -->|URLs List| Layer1
+    Google -->|URLs List| Layer1
+    Yahoo -->|URLs List| Layer1
     
-    T3 --> PS
-    PS --> P1
-    PS --> P2
-    PS --> P3
+    Layer1 -->|Fail or CF| Layer2
+    Layer2 -->|Fail or CF| Layer3
     
-    P1 & P2 & P3 -->|Content| I
-    I -->|SSE Events| B
-    B --> E
-    E --> C
-    I -->|Sources| D
+    Layer3 -->|Acquire| Semaphore
+    Semaphore -->|Assign| Browser1
+    Semaphore -->|Assign| Browser2
+    Semaphore -->|Assign| Browser3
+    
+    Browser1 & Browser2 & Browser3 -->|HTML| Trafilatura
+    Trafilatura -->|Content| TextClean
+    TextClean -->|Dict| PromptBuilder
+    
+    PromptBuilder -->|Build| GemmaAPI
+    GemmaAPI -->|Stream| TokenStream
+    TokenStream -->|Buffer & Yield| SSEHook
+    
+    SSEHook -->|Display| MessageBubble
+    GemmaAPI -->|Sources| SourcesPanel
+    
+    TokenStream -->|Cache| RedisStore
+    RedisFetch -->|Cached Result| TokenStream
+
+    style Frontend fill:#e1f5ff
+    style FastAPIMeta fill:#fff3e0
+    style SearchEngines fill:#f3e5f5
+    style ScraperTier fill:#e8f5e9
+    style BrowserPoolSubgraph fill:#fce4ec
+    style ContentProcessing fill:#ede7f6
+    style LLMProcessing fill:#fff9c4
+    style CacheLayer fill:#c8e6c9
 ```
 
----
-
-## 🔧 Core Components
-
-### 1. BrowserPool (Parallel Scraping)
-```python
-class BrowserPool:
-    def __init__(self, size=3):
-        self._pool = [BrowserSession() for _ in range(3)]
-        self._semaphore = threading.Semaphore(3)
-    
-    def fetch_html(self, url, timeout_s=8.0):
-        session = self._acquire()  # Blocking acquire
-        try:
-            return session.fetch_page_fast(url, timeout_s)
-        finally:
-            self._release(session)
-```
-
-**Why it matters**: Instead of sequential scraping (15 URLs × 5s = 75s), we scrape 3 URLs simultaneously (~25s total).
-
-### 2. 3-Tier Scraping Strategy
-| Tier | Method | Timeout | Use Case |
-|------|--------|---------|----------|
-| 1 | aiohttp | 4s | Static sites, no JS |
-| 2 | curl_cffi | 8s | TLS fingerprint bypass |
-| 3 | BrowserPool | 8s | JS-rendered, CF-protected |
-
-### 3. Fast Fetch (`fetch_page_fast`)
-- Uses `driver.get()` directly (not `uc_open_with_reconnect`)
-- Hard timeout via `set_page_load_timeout()`
-- Accepts partial HTML (≥500 chars)
-- Quick CF detection with 2s grace period
+**Component Breakdown:**
+- **Frontend**: React + Vite SPA with real-time SSE streaming and markdown support
+- **Backend**: FastAPI async endpoints with concurrent search and scraping
+- **Search Layer**: Multi-engine queries (Google/Bing/DDG/Yahoo) with JS rendering
+- **Scraper Tiers**: 3-layer fallback (aiohttp → curl_cffi → BrowserPool) for reliability
+- **Browser Pool**: 3 semaphore-controlled parallel browsers for speed
+- **Content Processing**: Trafilatura extraction + text normalization
+- **LLM Integration**: Gemma streaming API with token-by-token SSE response
+- **Caching**: Redis with 1-hour TTL for performance optimization
 
 ---
-
-## 📈 Performance Optimizations
-
-| Optimization | Before | After |
-|-------------|--------|-------|
-| Browser Pool | 1 browser, sequential | 3 browsers, parallel |
-| Page Load | uc_open (slow) | driver.get + timeout |
-| Search Engines | 5 engines | 3 engines (removed Bing/Brave) |
-| Max URLs | 15 | 8 (quality > quantity) |
-| Concurrency | 5 | 10 |
-
----
-
-## 🎨 Frontend Features
-
-### Right-Side Sources Panel
-- **Card-based layout**: Each source as a clickable card
-- **Favicon generation**: First letter of domain as icon
-- **Hover effects**: Gradient accent bar on hover
-- **Sticky header**: Shows source count
-- **Responsive**: Hides on mobile (<900px)
-
-### Markdown Support
-```javascript
-// Supports # through #### headings
-/^#{1,4}\s+/ → <h1> to <h4>
-
-// Supports **bold**, *italic*
-/\*\*(.+?)\*\*/ → <strong>
-/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/ → <em>
-
-// Lists (ordered/unordered)
-/^\d+\.\s+/ → <ol>
-/^[*\-+]]\s+/ → <ul>
-```
-
----
-
-## 🔄 Data Flow
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant F as Frontend
-    participant B as Backend
-    participant S as Search Engines
-    participant P as Browser Pool
-    participant L as LLM
-
-    U->>F: Type query
-    F->>B: GET /search?q=...
-    
-    par Parallel Search
-        B->>S: Google
-        B->>S: Bing
-        B->>S: DDG
-        B->>S: Yahoo
-    end
-    
-    S-->>B: URLs[]
-    
-    par Parallel Scraping (max 3)
-        B->>P: Browser 1
-        B->>P: Browser 2
-        B->>P: Browser 3
-    end
-    
-    P-->>B: Content{}
-    
-    B->>L: Build prompt + stream
-    loop Streaming
-        L-->>B: Token
-        B-->>F: SSE: data: token
-        F->>F: Append to message
-    end
-    
-    B-->>F: SSE: final + sources
-    F->>F: Update sources sidebar
-    F-->>U: Show answer + sources
-```
-
----
-
-## 🛠️ Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| LLM timeout | Increase timeout in `ask_llm()` (default: 300s) |
-| Browser pool fail | Check Chrome/Chromium installed |
-| No sources | Check `MAX_RETRIES=1` in selenium_scraper.py |
-| CF blocks | curl_cffi tier handles most; pool is fallback |
-
----
-
-## 📚 Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | FastAPI, asyncio, httpx, aiohttp |
-| Scraping | SeleniumBase, curl_cffi, BeautifulSoup |
-| Frontend | React 18, Vite, CSS3 |
-| Cache | Redis (optional) |
-| LLM | OpenAI-compatible API (LM Studio, etc.) |
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing`)
-5. Open a Pull Request
-
----
-
-## 📝 License
-
-MIT License - feel free to use for personal or commercial projects.
-
----
-
-## 🙏 Acknowledgments
-
-- [SeleniumBase](https://seleniumbase.io/) for undetected Chrome automation
-- [curl_cffi](https://github.com/yifeikong/curl_cffi) for TLS impersonation
-- [trafilatura](https://trafilatura.readthedocs.io/) for content extraction
-- [FastAPI](https://fastapi.tiangolo.com/) for the backend framework
-
----
-
-**Made with ❤️ by Muhammad Umer**
