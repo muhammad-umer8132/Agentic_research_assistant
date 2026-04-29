@@ -501,10 +501,10 @@ class BrowserPool:
         self._initialized = False
 
     def init(self, seed_url: str = "https://example.com"):
-        """Pool mein N browsers PARALLEL launch karo."""
+        """Pool launch — staggered (avoid race conditions in SeleniumBase)."""
         if self._initialized:
             return
-        logger.info(f"🚀 Launching browser pool (size={self.size}) in parallel...")
+        logger.info(f"🚀 Launching browser pool (size={self.size}) staggered...")
         
         sessions = [BrowserSession() for _ in range(self.size)]
         threads = []
@@ -513,17 +513,17 @@ class BrowserPool:
         def _start_one(idx, session):
             results[idx] = session.start(seed_url)
         
-        # Saare browsers ek saath launch karo
+        # Stagger by 2 seconds — avoids SeleniumBase port/profile collisions
         for i, s in enumerate(sessions):
             t = threading.Thread(target=_start_one, args=(i, s), daemon=True)
             t.start()
             threads.append(t)
+            time.sleep(2)   # ← KEY: wait before next launch
         
-        # Sab ke ready hone ka wait karo
+        # Wait for all to finish
         for t in threads:
             t.join()
         
-        # Successful sessions ko pool mein add karo
         for i, (s, ok) in enumerate(zip(sessions, results)):
             if ok:
                 self._pool.append(s)

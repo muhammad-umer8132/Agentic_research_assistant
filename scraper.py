@@ -12,29 +12,19 @@ _browser_pool = None
 _search_scraper = None 
 
 def init_selenium():
-    
+    """Startup pe browsers launch karo — search PEHLE, phir pool."""
     global _selenium_scraper, _browser_pool, _search_scraper
     
-    def _init_search():
-        global _selenium_scraper, _search_scraper
-        if _selenium_scraper is None:
-            _selenium_scraper = UniversalScraper()
-            _selenium_scraper.init("https://www.google.com")
-            _search_scraper = _selenium_scraper 
+    # ── Step 1: Search browser PEHLE (alone, no race) ──
+    if _selenium_scraper is None:
+        _selenium_scraper = UniversalScraper()
+        _selenium_scraper.init("https://www.google.com")
+        _search_scraper = _selenium_scraper
     
-    def _init_pool():
-        global _browser_pool
-        if _browser_pool is None:
-            _browser_pool = BrowserPool(size=3)
-            _browser_pool.init("https://example.com")
-    
-    # Dono parallel chalao
-    t1 = threading.Thread(target=_init_search, daemon=True)
-    t2 = threading.Thread(target=_init_pool, daemon=True)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+    # ── Step 2: Search browser ready ho gaya, ab pool launch karo ──
+    if _browser_pool is None:
+        _browser_pool = BrowserPool(size=3)
+        _browser_pool.init("https://example.com")
     
     logger.info("✅ All browsers initialized")
 

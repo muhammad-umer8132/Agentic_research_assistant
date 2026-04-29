@@ -100,15 +100,21 @@ async def safe_search(name: str, coro, timeout: int = 20) -> list:
 # ── Search Engines ─────────────────────────────────────────────────────────────
 
 async def search_ddg(query: str, max_results: int = 8) -> list:
-    """
-    duckduckgo-search library — thread pool mein chalao taake async loop block na ho.
-    Timeout safe_search mein handle hota hai.
-    """
+    """DuckDuckGo — explicit backend to avoid internal cascading timeouts."""
     loop = asyncio.get_event_loop()
     def _sync():
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-            return [r['href'] for r in results if r.get('href','').startswith('http')]
+        try:
+            with DDGS() as ddgs:
+                # ✅ Explicit backend: sirf DDG aur HTML, no Yandex/Brave fallback
+                results = list(ddgs.text(
+                    query, 
+                    max_results=max_results,
+                    backend="duckduckgo, yahoo",   # ← only these
+                ))
+                return [r['href'] for r in results if r.get('href','').startswith('http')]
+        except Exception as e:
+            logger.debug(f"DDG sync error: {e}")
+            return []
     return await loop.run_in_executor(None, _sync)
 
 
@@ -212,7 +218,7 @@ async def search_yahoo(query: str, max_results: int = 6) -> list:
     Yahoo redirect links decode karke real URLs nikalta hai.
     """
     url = f"https://search.yahoo.com/search?p={quote(query)}&n={max_results}"
-    async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         resp = await client.get(url, headers=BROWSER_HEADERS)
         if resp.status_code != 200:
             logger.warning(f"Yahoo status {resp.status_code} — skip")
@@ -234,8 +240,184 @@ async def search_yahoo(query: str, max_results: int = 6) -> list:
 
     return list(dict.fromkeys(links))[:max_results]
 
+# ── TIER 2: Backup Search Engines ──────────────────────────────────────────────
 
-# ── LLM (Sirf Gemma) ──────────────────────────────────────────────────────────
+async def search_startpage(query: str, max_results: int = 8) -> list:
+    """Startpage — Google results without tracking."""
+    url = f"https://www.startpage.com/sp/search?query={quote(query)}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                logger.warning(f"Startpage status {resp.status_code} — skip")
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('a.w-gl__result-title, a.result-link, h3 a[href^="http"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'startpage.com' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Startpage error: {e}")
+        return []
+
+
+async def search_searxng(query: str, max_results: int = 10) -> list:
+    """SearXNG — meta-search aggregator (10+ engines)."""
+    instances = [
+        "https://searx.be",
+        "https://priv.au",
+        "https://searx.tiekoetter.com",
+        "https://search.brave4u.com",
+        "https://searx.work",
+    ]
+    for instance in instances:
+        try:
+            url = f"{instance}/search?q={quote(query)}&format=json&language=en"
+            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+                resp = await client.get(url, headers=BROWSER_HEADERS)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                links = []
+                for r in data.get("results", [])[:max_results]:
+                    link = r.get("url", "")
+                    if link.startswith("http"):
+                        links.append(link)
+                if links:
+                    logger.info(f"✅ SearXNG ({instance.split('//')[1]}): {len(links)} URLs")
+                    return list(dict.fromkeys(links))[:max_results]
+        except Exception:
+            continue
+    logger.warning("All SearXNG instances failed")
+    return []
+
+
+async def search_mojeek(query: str, max_results: int = 8) -> list:
+    """Mojeek — independent index, separate from Google/Bing."""
+    url = f"https://www.mojeek.com/search?q={quote(query)}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('a.ob, h2 a[href^="http"], .results-standard a[href^="http"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'mojeek.com' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Mojeek error: {e}")
+        return []
+
+
+async def search_qwant(query: str, max_results: int = 8) -> list:
+    """Qwant — Bing-backed, JSON API."""
+    url = f"https://api.qwant.com/v3/search/web?q={quote(query)}&count={max_results}&locale=en_us&safesearch=1"
+    headers = {**BROWSER_HEADERS, "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            items = data.get("data", {}).get("result", {}).get("items", {}).get("mainline", [])
+            links = []
+            for item in items:
+                if item.get("type") == "web":
+                    for entry in item.get("items", []):
+                        link = entry.get("url", "")
+                        if link.startswith("http"):
+                            links.append(link)
+            return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Qwant error: {e}")
+        return []
+
+
+async def search_ecosia(query: str, max_results: int = 8) -> list:
+    """Ecosia — eco-friendly, Bing-backed."""
+    url = f"https://www.ecosia.org/search?q={quote(query)}"
+
+    enhanced_headers = {
+        **BROWSER_HEADERS,
+        "Referer": "https://www.ecosia.org/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Cache-Control": "max-age=0",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('a.result__title, a.result-url, a[data-test-id="result-link"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'ecosia.org' not in href:
+                links.append(href)
+        if not links:
+            for a in soup.select('article a[href^="http"]'):
+                href = a['href']
+                if 'ecosia.org' not in href:
+                    links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Ecosia error: {e}")
+        return []
+    
+# ── Tiered Search Logic ────────────────────────────────────────────────────────
+
+async def get_urls_tiered(q: str, min_required: int = 5) -> list:
+    """
+    Tier 1: Google, DuckDuckGo, Yahoo, Brave, Bing (parallel)
+    Tier 2: Startpage, SearXNG, Mojeek, Qwant, Ecosia (only if Tier 1 weak)
+    """
+    all_urls = []
+    seen = set()
+    
+    def add_urls(new_urls):
+        for url in new_urls:
+            if url not in seen and url.startswith("http"):
+                seen.add(url)
+                all_urls.append(url)
+    
+    # ── TIER 1 ──
+    logger.info("🎯 TIER 1: Google, DuckDuckGo, Yahoo, Brave, Bing")
+    tier1 = await asyncio.gather(
+        safe_search("Google",     search_google(q, 10), timeout=25),
+        safe_search("DuckDuckGo", search_ddg(q, 8),     timeout=20),
+        safe_search("Yahoo",      search_yahoo(q, 8),   timeout=15),
+        safe_search("Brave",      search_brave(q, 8),   timeout=20),
+        safe_search("Bing",       search_bing(q, 10),   timeout=25),
+    )
+    for urls in tier1:
+        add_urls(urls)
+    
+    if len(all_urls) >= min_required:
+        logger.info(f"✅ Tier 1 sufficient: {len(all_urls)} URLs")
+        return all_urls
+    
+    # ── TIER 2 ──
+    logger.warning(f"⚠️ Tier 1 weak ({len(all_urls)} URLs) — trying Tier 2")
+    tier2 = await asyncio.gather(
+        safe_search("Startpage", search_startpage(q, 8), timeout=15),
+        safe_search("SearXNG",   search_searxng(q, 10),  timeout=20),
+        safe_search("Mojeek",    search_mojeek(q, 8),    timeout=15),
+        safe_search("Qwant",     search_qwant(q, 8),     timeout=15),
+        safe_search("Ecosia",    search_ecosia(q, 8),    timeout=15),
+    )
+    for urls in tier2:
+        add_urls(urls)
+    
+    logger.info(f"🏁 Final from all tiers: {len(all_urls)} URLs")
+    return all_urls
+# ── LLM (Gemma) ──────────────────────────────────────────────────────────
 async def ask_llm(prompt: str):
     base_url = os.getenv("LLM_BASE_URL", "https://gemma4.limeox.org/v1/chat/completions")
     model    = os.getenv("LLM_MODEL", "gemma4")
@@ -255,7 +437,7 @@ async def ask_llm(prompt: str):
             resp = await client.post(base_url, json=json_data, headers=headers)
             logger.info(f"📡 LLM status: {resp.status_code}")
             if resp.status_code != 200:
-                yield f"Error: LLM status {resp.status_code}. Dobara try karein."
+                yield f"Error: LLM status {resp.status_code}. try again."
                 return
 
             token_count = 0
@@ -326,38 +508,29 @@ async def search_endpoint(q: str = Query(...)):
             yield "data: [DONE]\n\n"
         return StreamingResponse(cached_streamer(), media_type="text/event-stream")
 
-    # 2. Parallel search — 5 engines, 20s timeout each
-    #    Koi bhi fail ho, baaki chalte rahenge
-    search_tasks = [
-        safe_search("DuckDuckGo", search_ddg(q, 8),    timeout=25),  
-        safe_search("Google",     search_google(q, 8),  timeout=35),
-        #safe_search("Bing",       search_bing(q, 8),    timeout=35),
-        #safe_search("Brave",      search_brave(q, 6),   timeout=15),
-        safe_search("Yahoo",      search_yahoo(q, 6),   timeout=15),
-    ]
-    results_lists = await asyncio.gather(*search_tasks)
-
-    all_urls = []
-    for res in results_lists:
-        all_urls.extend(res)
-
-    seen = set()
-    unique_urls = []
-    for url in all_urls:
-        if url not in seen and url.startswith("http"):
-            seen.add(url)
-            unique_urls.append(url)
-
-    urls = unique_urls[:8]
+    # 2. Tiered search (10 engines total)
+    all_urls = await get_urls_tiered(q, min_required=5)
+    urls = all_urls[:8]
     logger.info(f"🔗 Unique URLs to scrape: {len(urls)}")
 
+    # 3. Saare engines fail — graceful error
     if not urls:
-        return {"error": "Kisi bhi search engine se results nahi aaye"}
+        async def error_streamer():
+            yield "data: ⚠️ All search engines unavailable right now.\n\n"
+            yield "data: Please try again in a moment.\n\n"
+            yield f"event: final\ndata: {json.dumps({'sources':[]})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(error_streamer(), media_type="text/event-stream")
 
     # 3. Scrape
     contents = await scrape_urls(urls)
     if not contents:
-        return {"error": "Content scrape nahi ho saka"}
+        async def scrape_error_streamer():
+            yield "data: Found URLs but couldn't read content.\n\n"
+            yield "data: ⚠️ Websites blocked our requests. Try again.\n\n"
+            yield f"event: final\ndata: {json.dumps({'sources':urls[:5]})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(scrape_error_streamer(), media_type="text/event-stream")
 
     logger.info(f"📄 Scraped {len(contents)} pages")
     prompt = build_prompt(q, contents)
