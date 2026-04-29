@@ -37,6 +37,11 @@ ENV/
 *.swo
 *~
 
+# Node.js / Frontend
+node_modules/
+frontend/node_modules/
+*.local
+
 # Logs
 *.log
 
