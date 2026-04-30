@@ -1,6 +1,6 @@
 # 🤖 Agentic Research Assistant
 
-An intelligent AI-powered research assistant that aggregates information from multiple search engines, scrapes web content in parallel using a browser pool, and provides comprehensive answers with cited sources.
+An intelligent AI-powered research assistant that aggregates information from **20 search engines** across 4 tiers, scrapes web content with a self-healing browser pool, and provides comprehensive answers with cited sources. Features a modern Google AI Mode-inspired interface.
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com)
@@ -11,13 +11,18 @@ An intelligent AI-powered research assistant that aggregates information from mu
 
 ## 🌟 Features
 
-- **Multi-Engine Search**: Queries Google, Bing, DuckDuckGo, Yahoo simultaneously
+- **20 Search Engines (4 Tiers)**: Google, Bing, DDG, Yahoo, Brave, Startpage, SearXNG, Mojeek, Qwant, Ecosia, Yandex, Marginalia, You.com, Swisscows, Baidu, Stract, Presearch, Metager, LibreX, Whoogle
+- **Smart Tiered Strategy**: Tier 1 (Selenium) → Tier 2 (Meta-search) → Tier 3 (Global) → Tier 4 (Niche)
+- **Selenium Auto-Recovery**: Health monitoring with automatic driver restart on failures
+- **Sequential Selenium**: Prevents deadlock by running shared-driver engines sequentially
+- **HTTP Session Warmup**: Browser-like headers + homepage warmup to bypass 403 blocks
+- **LLM Continuation**: Auto-continues partial responses on connection drops (no duplication)
 - **Parallel Browser Pool**: 3 concurrent browser instances for ultra-fast scraping
-- **Smart Fallback Strategy**: aiohttp → curl_cffi → Selenium (layered approach)
+- **3-Tier Scraping**: aiohttp → curl_cffi → Selenium (layered fallback)
 - **Real-time Streaming**: SSE-based response streaming for instant feedback
-- **Right-Side Sources Panel**: Card-based source display in a knowledge panel layout
+- **Google AI Mode UI**: Clean, modern interface with right-side sources panel
 - **Redis Caching**: Result caching for faster repeat queries
-- **Markdown Rendering**: Full markdown support with headings, lists, bold/italic
+- **Full Markdown Support**: Headings, lists, bold/italic, citations
 
 ---
 
@@ -114,7 +119,7 @@ flowchart LR
     CheckCache -->|Yes| UseCached["⚡ Get Answer<br/>from Memory"]
     CheckCache -->|No| MultiSearch["🔍 Search Multiple<br/>Engines<br/>Google, Bing,<br/>DuckDuckGo, Yahoo"]
     
-    MultiSearch -->|Collect URLs| FetchWebsites["🌐 Fast Fetch<br/>from Websites<br/>3 Browsers<br/>Working in Parallel"]
+    MultiSearch -->|Tier 1-4 Cascade| FetchWebsites["🌐 Smart Scraping<br/>3 Browsers +<br/>Auto-Recovery<br/>Session Warmup"]
     
     FetchWebsites -->|Extract Content| AIThinks["🧠 AI Reads Content<br/>& Writes Answer"]
     
@@ -146,8 +151,8 @@ flowchart LR
 
 **How it works (Simple):**
 1. **You ask** a question in the web interface
-2. **We search** Google, Bing, DuckDuckGo, Yahoo at the same time
-3. **We scrape** the top websites using 3 browsers working together
+2. **20 Search Engines**: 4-tier cascade — Tier 1 → Tier 2 → Tier 3 → Tier 4
+3. **We scrape** using 3 browsers with auto-recovery and health monitoring
 4. **AI reads** all the content and writes a comprehensive answer
 5. **You see** the response appear word-by-word, with sources on the right
 
@@ -210,9 +215,11 @@ flowchart TD
     CacheCheck -->|Cache Hit| TokenStream
     CacheCheck -->|Cache Miss| ParallelSearch
     
-    ParallelSearch -->|asyncio.gather| DDG
-    ParallelSearch -->|asyncio.gather| Google
-    ParallelSearch -->|asyncio.gather| Yahoo
+    ParallelSearch -->|HTTP Parallel| DDG
+    ParallelSearch -->|HTTP Parallel| Yahoo
+    ParallelSearch -->|Sequential| Google
+    ParallelSearch -->|Sequential| Bing
+    ParallelSearch -->|Sequential| Brave
     
     DDG -->|URLs List| Layer1
     Google -->|URLs List| Layer1
@@ -271,14 +278,62 @@ class BrowserPool:
 
 **Why it matters**: Instead of sequential scraping (15 URLs × 5s = 75s), we scrape 3 URLs simultaneously (~25s total).
 
-### 2. 3-Tier Scraping Strategy
+### 2. 4-Tier Search Strategy
+| Tier | Engines | Count | Purpose |
+|------|---------|-------|---------|
+| 1 | Google, Bing, Brave (Selenium) + DDG, Yahoo (HTTP) | 5 | Primary sources |
+| 2 | Startpage, SearXNG, Mojeek, Qwant, Ecosia | 5 | Meta-search & privacy |
+| 3 | Yandex, Marginalia, You.com, Swisscows, Baidu | 5 | Global & independent |
+| 4 | Stract, Presearch, Metager, LibreX, Whoogle | 5 | Niche & open-source |
+
+### 3. 3-Tier Scraping Strategy
 | Tier | Method | Timeout | Use Case |
 |------|--------|---------|----------|
 | 1 | aiohttp | 4s | Static sites, no JS |
 | 2 | curl_cffi | 8s | TLS fingerprint bypass |
 | 3 | BrowserPool | 8s | JS-rendered, CF-protected |
 
-### 3. Fast Fetch (`fetch_page_fast`)
+### 4. Selenium Auto-Recovery
+```python
+# Health monitoring with automatic restart
+_selenium_failures = 0
+_SELENIUM_MAX_FAILURES = 3
+
+async def restart_selenium_if_needed():
+    if _selenium_failures >= 3:
+        close_selenium()
+        await asyncio.sleep(1)
+        init_selenium()  # Fresh start
+```
+
+### 5. HTTP Session Warmup (403 Bypass)
+```python
+def get_realistic_headers(referer: str = None) -> dict:
+    return {
+        "User-Agent": "Mozilla/5.0...Chrome/124...",
+        "Sec-Ch-Ua": '"Chromium";v="124"...',
+        "Sec-Fetch-Site": "none" if not referer else "same-origin",
+        # ... full browser headers
+    }
+
+# Mojeek/Ecosia: warmup + 0.5s delay
+await client.get("https://www.mojeek.com/", headers=get_realistic_headers())
+await asyncio.sleep(0.5)
+```
+
+### 6. LLM Continuation (No Duplication)
+```python
+accumulated_content = ""  # Track partial response
+
+# On RemoteProtocolError:
+current_prompt = f"""Continue from EXACTLY where you left off.
+Do NOT repeat anything already written.
+
+{accumulated_content}"""
+# Retry with continuation prompt → yields NEW tokens only
+```
+
+### 7. Fast Fetch (`fetch_page_fast`)
 - Uses `driver.get()` directly (not `uc_open_with_reconnect`)
 - Hard timeout via `set_page_load_timeout()`
 - Accepts partial HTML (≥500 chars)
@@ -292,7 +347,11 @@ class BrowserPool:
 |-------------|--------|-------|
 | Browser Pool | 1 browser, sequential | 3 browsers, parallel |
 | Page Load | uc_open (slow) | driver.get + timeout |
-| Search Engines | 5 engines | 3 engines (removed Bing/Brave) |
+| Search Engines | 5 engines | **20 engines (4 tiers)** |
+| Selenium Health | No monitoring | **Auto-recovery on 3 failures** |
+| HTTP 403 Blocks | Basic headers | **Session warmup + realistic headers** |
+| LLM Errors | Stop on error | **Continue from partial (no dup)** |
+| Selenium Execution | Parallel (deadlock risk) | **Sequential (shared driver safe)** |
 | Max URLs | 15 | 8 (quality > quantity) |
 | Concurrency | 5 | 10 |
 
@@ -300,12 +359,13 @@ class BrowserPool:
 
 ## 🎨 Frontend Features
 
-### Right-Side Sources Panel
-- **Card-based layout**: Each source as a clickable card
-- **Favicon generation**: First letter of domain as icon
-- **Hover effects**: Gradient accent bar on hover
-- **Sticky header**: Shows source count
+### Right-Side Sources Panel (Google AI Mode Style)
+- **Card-based layout**: Clean, minimal cards with domain favicons
+- **Favicon generation**: First letter of domain as colored icon
+- **Hover effects**: Subtle background highlight
+- **Sticky header**: Source count with clean typography
 - **Responsive**: Hides on mobile (<900px)
+- **Smooth animations**: Slide-in with fade effects
 
 ### Markdown Support
 ```javascript
@@ -372,10 +432,12 @@ sequenceDiagram
 
 | Issue | Solution |
 |-------|----------|
-| LLM timeout | Increase timeout in `ask_llm()` (default: 300s) |
-| Browser pool fail | Check Chrome/Chromium installed |
+| LLM timeout / connection drop | **Auto-continuation** — resumes from partial response |
+| Browser pool fail | **Auto-recovery** — restarts after 3 consecutive failures |
+| Selenium deadlock | **Sequential execution** — Google → Bing → Brave (no parallel) |
 | No sources | Check `MAX_RETRIES=1` in selenium_scraper.py |
-| CF blocks | curl_cffi tier handles most; pool is fallback |
+| CF blocks / 403 errors | **Session warmup** — homepage visit + realistic headers |
+| LLM partial response | Already handled — continues without duplication |
 
 ---
 
@@ -383,11 +445,12 @@ sequenceDiagram
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | FastAPI, asyncio, httpx, aiohttp |
-| Scraping | SeleniumBase, curl_cffi, BeautifulSoup |
-| Frontend | React 18, Vite, CSS3 |
+| Backend | FastAPI, asyncio, httpx, aiohttp, BeautifulSoup |
+| Scraping | SeleniumBase, curl_cffi, trafilatura |
+| Frontend | React 18, Vite, CSS3 (Google AI Mode design) |
+| Search | 20 engines across 4 tiers |
 | Cache | Redis (optional) |
-| LLM | OpenAI-compatible API (LM Studio, etc.) |
+| LLM | OpenAI-compatible API with continuation support |
 
 ---
 
