@@ -161,100 +161,38 @@ flowchart LR
 ### Technical Deep Dive
 
 ```mermaid
-flowchart TD
-    subgraph Frontend["🎨 Frontend Layer [React + Vite]"]
-        UI["User Query Input"]
-        SSEHook["useSSE Hook<br/>SSE Connection"]
-        MessageBubble["MessageBubble Component<br/>Markdown Rendering"]
-        SourcesPanel["Sources Panel<br/>Card Layout"]
-    end
+flowchart LR
+    Start([👤 User]) -->|Asks Question| InputBox["💬 Type Your Question"]
 
-    subgraph FastAPIMeta["⚡ FastAPI Backend"]
-        SearchEndpoint["/search Endpoint<br/>Query Handler"]
-        CacheCheck["Cache Check<br/>Redis Lookup"]
-        ParallelSearch["Parallel Search<br/>asyncio.gather"]
-    end
+    InputBox -->|Click Search| CheckCache{{"❓ Have we answered this before?"}}
 
-    subgraph SearchEngines["🔍 Search Layer"]
-        DDG["DuckDuckGo<br/>text search"]
-        Google["Google Search<br/>Selenium JS Render"]
-        Yahoo["Yahoo Search<br/>httpx + redirect"]
-    end
+    CheckCache -->|Yes - Instant!| StreamAnswer["📡 Stream Answer Word by Word"]
+    CheckCache -->|No| MultiSearch["🔍 Search Multiple Engines<br/>Google, Bing, DuckDuckGo, Yahoo"]
 
-    subgraph ScraperTier["📄 3-Tier Scraper"]
-        Layer1["Tier 1: aiohttp<br/>Timeout: 4s<br/>Static Sites"]
-        Layer2["Tier 2: curl_cffi<br/>Timeout: 8s<br/>TLS Impersonation"]
-        Layer3["Tier 3: Browser Pool<br/>Timeout: 8s<br/>JS Rendering"]
-    end
+    MultiSearch -->|Tier 1-4 Cascade| FetchWebsites["🌐 Smart Scraping<br/>3 Browsers + Auto-Recovery<br/>Session Warmup"]
 
-    subgraph BrowserPoolSubgraph["🎪 Browser Pool [3 Instances]"]
-        Browser1["Browser 1<br/>SeleniumBase UC"]
-        Browser2["Browser 2<br/>SeleniumBase UC"]
-        Browser3["Browser 3<br/>SeleniumBase UC"]
-        Semaphore["Semaphore<br/>Max: 3"]
-    end
+    FetchWebsites -->|Extract Content| AIThinks["🧠 AI Reads Content & Writes Answer"]
+    FetchWebsites -->|Save for Later| Memory["💾 Remember for Next Time"]
 
-    subgraph ContentProcessing["🧠 Content Processing"]
-        Trafilatura["Trafilatura<br/>Content Extraction"]
-        TextClean["Text Cleanup<br/>2000 char limit"]
-    end
+    AIThinks -->|Generate| StreamAnswer
 
-    subgraph LLMProcessing["🤖 LLM Integration"]
-        PromptBuilder["Prompt Builder<br/>Citation Format"]
-        GemmaAPI["Gemma API Call<br/>httpx Streaming"]
-        TokenStream["Token Stream<br/>SSE Events"]
-    end
+    StreamAnswer -->|Display| ChatUI["💬 Show in Chat Bubble"]
+    StreamAnswer -->|Display| SourcesUI["📚 Show Sources on Right Side"]
 
-    subgraph CacheLayer["💾 Redis Cache"]
-        RedisStore["Redis SETEX<br/>TTL: 3600s"]
-        RedisFetch["Redis GET<br/>Key: search:query"]
-    end
+    ChatUI -->|Result| End(["👤 User Sees Complete Answer with Sources"])
+    SourcesUI -->|Result| End
 
-    UI -->|POST /search| SearchEndpoint
-    SearchEndpoint -->|Check| CacheCheck
-    CacheCheck -->|Cache Hit| TokenStream
-    CacheCheck -->|Cache Miss| ParallelSearch
-    
-    ParallelSearch -->|HTTP Parallel| DDG
-    ParallelSearch -->|HTTP Parallel| Yahoo
-    ParallelSearch -->|Sequential| Google
-    ParallelSearch -->|Sequential| Bing
-    ParallelSearch -->|Sequential| Brave
-    
-    DDG -->|URLs List| Layer1
-    Google -->|URLs List| Layer1
-    Yahoo -->|URLs List| Layer1
-    
-    Layer1 -->|Fail or CF| Layer2
-    Layer2 -->|Fail or CF| Layer3
-    
-    Layer3 -->|Acquire| Semaphore
-    Semaphore -->|Assign| Browser1
-    Semaphore -->|Assign| Browser2
-    Semaphore -->|Assign| Browser3
-    
-    Browser1 & Browser2 & Browser3 -->|HTML| Trafilatura
-    Trafilatura -->|Content| TextClean
-    TextClean -->|Dict| PromptBuilder
-    
-    PromptBuilder -->|Build| GemmaAPI
-    GemmaAPI -->|Stream| TokenStream
-    TokenStream -->|Buffer & Yield| SSEHook
-    
-    SSEHook -->|Display| MessageBubble
-    GemmaAPI -->|Sources| SourcesPanel
-    
-    TokenStream -->|Cache| RedisStore
-    RedisFetch -->|Cached Result| TokenStream
-
-    style Frontend fill:#e1f5ff
-    style FastAPIMeta fill:#fff3e0
-    style SearchEngines fill:#f3e5f5
-    style ScraperTier fill:#e8f5e9
-    style BrowserPoolSubgraph fill:#fce4ec
-    style ContentProcessing fill:#ede7f6
-    style LLMProcessing fill:#fff9c4
-    style CacheLayer fill:#c8e6c9
+    style Start fill:#b3e5fc
+    style InputBox fill:#81d4fa
+    style CheckCache fill:#ffd54f
+    style MultiSearch fill:#ce93d8
+    style FetchWebsites fill:#ffab91
+    style AIThinks fill:#fff59d
+    style StreamAnswer fill:#b2dfdb
+    style ChatUI fill:#c5e1a5
+    style SourcesUI fill:#f8bbd0
+    style Memory fill:#c8e6c9
+    style End fill:#a1887f
 ```
 
 ---
