@@ -7,3 +7,7 @@ httpx
 python-dotenv
 pydantic-settings
 playwright
+redis
+beautifulsoup4
+curl-cffi
+seleniumbase
