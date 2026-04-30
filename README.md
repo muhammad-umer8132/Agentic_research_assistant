@@ -112,30 +112,34 @@ REDIS_URL=redis://localhost:6379       # Optional: Redis caching
 
 ```mermaid
 flowchart LR
-    Start([👤 User]) -->|Asks Question| InputBox["💬 Type Your Question"]
+    Start([User]) -->|Asks question| InputBox["Type your question"]
+    InputBox -->|Click search| CheckCache{"Answered before?"}
 
-    InputBox -->|Click Search| CheckCache{{"❓ Have we answered this before?"}}
+    CheckCache -->|Yes - instant!| StreamAnswer["Stream answer word by word"]
+    CheckCache -->|No| Tier1["Tier 1 - Google, DDG, Yahoo, Bing, Brave"]
 
-    CheckCache -->|Yes - Instant!| StreamAnswer["📡 Stream Answer Word by Word"]
-    CheckCache -->|No| MultiSearch["🔍 Search Multiple Engines<br/>Google, Bing, DuckDuckGo, Yahoo"]
+    Tier1 -->|5+ URLs found| FetchWebsites["Smart scraping\n3 browsers + auto-recovery"]
+    Tier1 -->|Less than 5 URLs| Tier2["Tier 2 - Startpage, SearXNG, Mojeek"]
+    Tier2 -->|5+ URLs found| FetchWebsites
+    Tier2 -->|Still weak| Tier3["Tier 3 - Yandex, Baidu, You.com"]
+    Tier3 -->|Any URLs| FetchWebsites
 
-    MultiSearch -->|Tier 1-4 Cascade| FetchWebsites["🌐 Smart Scraping<br/>3 Browsers + Auto-Recovery<br/>Session Warmup"]
-
-    FetchWebsites -->|Extract Content| AIThinks["🧠 AI Reads Content & Writes Answer"]
-    FetchWebsites -->|Save for Later| Memory["💾 Remember for Next Time"]
-
+    FetchWebsites -->|Extract content| AIThinks["AI reads content and writes answer"]
     AIThinks -->|Generate| StreamAnswer
 
-    StreamAnswer -->|Display| ChatUI["💬 Show in Chat Bubble"]
-    StreamAnswer -->|Display| SourcesUI["📚 Show Sources on Right Side"]
+    StreamAnswer -->|Display| ChatUI["Show in chat bubble"]
+    StreamAnswer -->|Display| SourcesUI["Show sources on right side"]
+    StreamAnswer -->|Save after done| Memory["Remember for next time"]
 
-    ChatUI -->|Result| End(["👤 User Sees Complete Answer with Sources"])
-    SourcesUI -->|Result| End
+    ChatUI --> End(["User sees complete answer with sources"])
+    SourcesUI --> End
 
     style Start fill:#b3e5fc
     style InputBox fill:#81d4fa
     style CheckCache fill:#ffd54f
-    style MultiSearch fill:#ce93d8
+    style Tier1 fill:#ce93d8
+    style Tier2 fill:#ba68c8
+    style Tier3 fill:#ab47bc
     style FetchWebsites fill:#ffab91
     style AIThinks fill:#fff59d
     style StreamAnswer fill:#b2dfdb
@@ -158,107 +162,123 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-
-    subgraph Frontend["Frontend Layer [React + Vite]"]
+    subgraph Frontend["Frontend Layer - React + Vite"]
         UI["User Query Input"]
-        SSEHook["useSSE Hook<br/>SSE Connection"]
-        MessageBubble["MessageBubble Component<br/>Markdown Rendering"]
-        SourcesPanel["Sources Panel<br/>Card Layout"]
+        SSEHook["useSSE Hook - SSE Connection"]
+        MessageBubble["MessageBubble - Markdown Rendering"]
+        SourcesPanel["Sources Panel - Card Layout"]
     end
 
-    subgraph FastAPIMeta["FastAPI Backend"]
-        SearchEndpoint["/search Endpoint<br/>Query Handler"]
-        CacheCheck["Cache Check<br/>Redis Lookup"]
-        ParallelSearch["Parallel Search<br/>asyncio.gather"]
-    end
-
-    subgraph SearchEngines["Search Layer"]
-        DDG["DuckDuckGo<br/>text search"]
-        Google["Google Search<br/>Selenium JS Render"]
-        Yahoo["Yahoo Search<br/>httpx + redirect"]
-        Bing["Bing Search"]
-        Brave["Brave Search"]
-    end
-
-    subgraph ScraperTier["3-Tier Scraper"]
-        Layer1["Tier 1: aiohttp<br/>Timeout: 4s<br/>Static Sites"]
-        Layer2["Tier 2: curl_cffi<br/>Timeout: 8s<br/>TLS Impersonation"]
-        Layer3["Tier 3: Browser Pool<br/>Timeout: 8s<br/>JS Rendering"]
-    end
-
-    subgraph BrowserPoolSubgraph["Browser Pool [3 Instances]"]
-        Browser1["Browser 1<br/>SeleniumBase UC"]
-        Browser2["Browser 2<br/>SeleniumBase UC"]
-        Browser3["Browser 3<br/>SeleniumBase UC"]
-        Semaphore["Semaphore<br/>Max: 3"]
-    end
-
-    subgraph ContentProcessing["Content Processing"]
-        Trafilatura["Trafilatura<br/>Content Extraction"]
-        TextClean["Text Cleanup<br/>2000 char limit"]
-    end
-
-    subgraph LLMProcessing["LLM Integration"]
-        PromptBuilder["Prompt Builder<br/>Citation Format"]
-        GemmaAPI["Gemma API Call<br/>httpx Streaming"]
-        TokenStream["Token Stream<br/>SSE Events"]
+    subgraph Backend["FastAPI Backend"]
+        SearchEndpoint["/search Endpoint"]
+        CacheCheck["Cache Check - Redis Lookup"]
     end
 
     subgraph CacheLayer["Redis Cache"]
-        RedisStore["Redis SETEX<br/>TTL: 3600s"]
-        RedisFetch["Redis GET<br/>Key: search:query"]
+        RedisFetch["Redis GET - Key: search:query"]
+        RedisStore["Redis SETEX - TTL: 3600s"]
+    end
+
+    subgraph Tier1Group["Tier 1 - Primary Engines"]
+        DDG["DuckDuckGo - httpx parallel"]
+        Yahoo["Yahoo - httpx parallel"]
+        Google["Google - Selenium sequential"]
+        Bing["Bing - Selenium sequential"]
+        Brave["Brave - Selenium sequential"]
+    end
+
+    subgraph Tier2Group["Tier 2 - Only if Tier 1 less than 5 URLs"]
+        Startpage["Startpage"]
+        SearXNG["SearXNG"]
+        Mojeek["Mojeek + warmup"]
+        Qwant["Qwant"]
+        Ecosia["Ecosia + warmup"]
+    end
+
+    subgraph Tier3Group["Tier 3 - Only if Tier 2 still weak"]
+        Yandex["Yandex"]
+        Marginalia["Marginalia"]
+        YouCom["You.com"]
+        Baidu["Baidu"]
+    end
+
+    subgraph ScraperTier["3-Tier Scraper - per URL"]
+        Layer1["Tier 1: aiohttp - 4s - static sites"]
+        Layer2["Tier 2: curl_cffi - 8s - TLS impersonation"]
+        Layer3["Tier 3: BrowserPool - 8s - JS rendering"]
+    end
+
+    subgraph BrowserPoolGroup["Browser Pool - 3 instances"]
+        Semaphore["Semaphore max 3"]
+        Browser1["Browser 1 - SeleniumBase UC"]
+        Browser2["Browser 2 - SeleniumBase UC"]
+        Browser3["Browser 3 - SeleniumBase UC"]
+    end
+
+    subgraph ContentProcessing["Content Processing"]
+        Trafilatura["Trafilatura - content extraction"]
+        TextClean["Text cleanup - 2000 char limit"]
+    end
+
+    subgraph LLMProcessing["LLM Integration"]
+        PromptBuilder["Prompt Builder - citation format"]
+        GemmaAPI["Gemma API - httpx streaming"]
+        TokenStream["Token Stream - SSE events"]
     end
 
     UI -->|POST /search| SearchEndpoint
     SearchEndpoint --> CacheCheck
+    CacheCheck -->|Cache hit| RedisFetch
+    RedisFetch -->|Cached tokens| TokenStream
 
-    CacheCheck -->|Cache Hit| RedisFetch
-    RedisFetch -->|Return Cached| TokenStream
+    CacheCheck -->|Cache miss| DDG
+    CacheCheck -->|Cache miss| Yahoo
+    DDG -->|parallel| UrlPool["URL pool"]
+    Yahoo -->|parallel| UrlPool
+    UrlPool -->|sequential| Google
+    Google -->|if less than 5| Bing
+    Bing -->|if less than 5| Brave
+    Brave -->|still less than 5| Startpage
+    Startpage --> SearXNG
+    SearXNG --> Mojeek
+    Mojeek --> Qwant
+    Qwant --> Ecosia
+    Ecosia -->|still less than 5| Yandex
+    Yandex --> Marginalia
+    Marginalia --> YouCom
+    YouCom --> Baidu
 
-    CacheCheck -->|Cache Miss| ParallelSearch
+    Baidu --> Top8["Top 8 URLs selected"]
+    UrlPool --> Top8
+    Google --> Top8
+    Bing --> Top8
 
-    ParallelSearch --> DDG
-    ParallelSearch --> Yahoo
-    ParallelSearch --> Google
-    ParallelSearch --> Bing
-    ParallelSearch --> Brave
-
-    DDG --> Layer1
-    Google --> Layer1
-    Yahoo --> Layer1
-    Bing --> Layer1
-    Brave --> Layer1
-
-    Layer1 -->|Fail| Layer2
-    Layer2 -->|Fail| Layer3
-
+    Top8 --> Layer1
+    Layer1 -->|fail or CF block| Layer2
+    Layer2 -->|fail or CF block| Layer3
     Layer3 --> Semaphore
     Semaphore --> Browser1
     Semaphore --> Browser2
     Semaphore --> Browser3
-
     Browser1 --> Trafilatura
     Browser2 --> Trafilatura
     Browser3 --> Trafilatura
-
     Trafilatura --> TextClean
     TextClean --> PromptBuilder
-
     PromptBuilder --> GemmaAPI
     GemmaAPI --> TokenStream
-
     TokenStream --> SSEHook
     SSEHook --> MessageBubble
-
     GemmaAPI --> SourcesPanel
-
-    TokenStream --> RedisStore
+    TokenStream -->|after stream complete| RedisStore
 
     style Frontend fill:#e1f5ff
-    style FastAPIMeta fill:#fff3e0
-    style SearchEngines fill:#f3e5f5
+    style Backend fill:#fff3e0
+    style Tier1Group fill:#f3e5f5
+    style Tier2Group fill:#ede7f6
+    style Tier3Group fill:#e8eaf6
     style ScraperTier fill:#e8f5e9
-    style BrowserPoolSubgraph fill:#fce4ec
+    style BrowserPoolGroup fill:#fce4ec
     style ContentProcessing fill:#ede7f6
     style LLMProcessing fill:#fff9c4
     style CacheLayer fill:#c8e6c9
