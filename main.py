@@ -23,6 +23,35 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── Selenium Health Tracker ─────────────────────────────────────────────────────
+_selenium_failures = 0
+_SELENIUM_MAX_FAILURES = 3
+_selenium_lock = asyncio.Lock()
+
+async def restart_selenium_if_needed():
+    """Agar Selenium repeatedly fail ho, toh restart karo."""
+    global _selenium_failures
+    async with _selenium_lock:
+        if _selenium_failures >= _SELENIUM_MAX_FAILURES:
+            logger.warning("🔄 Restarting Selenium driver...")
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, close_selenium)
+                await asyncio.sleep(1)
+                await loop.run_in_executor(None, init_selenium)
+                _selenium_failures = 0
+                logger.info("✅ Selenium restarted")
+            except Exception as e:
+                logger.error(f"❌ Selenium restart failed: {e}")
+
+def mark_selenium_failure():
+    global _selenium_failures
+    _selenium_failures += 1
+
+def mark_selenium_success():
+    global _selenium_failures
+    _selenium_failures = 0
+
 # ── Redis ──────────────────────────────────────────────────────────────────────
 redis_client = None
 
@@ -81,20 +110,54 @@ BROWSER_HEADERS = {
     "DNT": "1",
 }
 
+# ── HTTP client with browser-like behavior ─────────────────────────────────────
+def get_realistic_headers(referer: str = None) -> dict:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none" if not referer else "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+        "DNT": "1",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
 # ── Safe wrapper ───────────────────────────────────────────────────────────────
 async def safe_search(name: str, coro, timeout: int = 20) -> list:
-    """Timeout aur exceptions dono handle karta hai — kabhi crash nahi karta."""
+    is_selenium = name in ("Google", "Bing", "Brave")
     try:
         result = await asyncio.wait_for(coro, timeout=timeout)
         if isinstance(result, list):
             logger.info(f"✅ {name}: {len(result)} URLs")
+            if is_selenium and len(result) > 0:
+                mark_selenium_success()
+            elif is_selenium:
+                mark_selenium_failure()
             return result
         return []
     except asyncio.TimeoutError:
         logger.warning(f"⏱️ {name}: timeout ({timeout}s) — skip")
+        if is_selenium:
+            mark_selenium_failure()
         return []
     except Exception as e:
         logger.warning(f"❌ {name}: {type(e).__name__}: {e}")
+        if is_selenium:
+            mark_selenium_failure()
         return []
 
 # ── Search Engines ─────────────────────────────────────────────────────────────
@@ -109,7 +172,7 @@ async def search_ddg(query: str, max_results: int = 8) -> list:
                 results = list(ddgs.text(
                     query, 
                     max_results=max_results,
-                    backend="duckduckgo, yahoo",   # ← only these
+                    backend="duckduckgo",   # ← only these
                 ))
                 return [r['href'] for r in results if r.get('href','').startswith('http')]
         except Exception as e:
@@ -213,10 +276,7 @@ async def search_brave(query: str, max_results: int = 6) -> list:
 
 
 async def search_yahoo(query: str, max_results: int = 6) -> list:
-    """
-    Yahoo Search — extra fallback engine.
-    Yahoo redirect links decode karke real URLs nikalta hai.
-    """
+    """Yahoo — RU= encoded redirect decode karta hai."""
     url = f"https://search.yahoo.com/search?p={quote(query)}&n={max_results}"
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         resp = await client.get(url, headers=BROWSER_HEADERS)
@@ -227,14 +287,17 @@ async def search_yahoo(query: str, max_results: int = 6) -> list:
     soup = BeautifulSoup(resp.text, 'html.parser')
     links = []
 
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        # Yahoo wraps links: /url?q=https://...
-        if '/url?q=' in href:
-            real = href.split('/url?q=')[1].split('&')[0]
-            real = unquote(real)
-            if real.startswith('http') and 'yahoo' not in real:
-                links.append(real)
+    # Yahoo wraps URLs as: .../RU=https%3a%2f%2fexample.com/RK=...
+    for a in soup.select('h3.title a, h3 a[href], a.fz-ms[href]'):
+        href = a.get('href', '')
+        if 'RU=' in href:
+            try:
+                ru_part = href.split('RU=')[1].split('/RK=')[0]
+                real = unquote(ru_part)
+                if real.startswith('http') and 'yahoo.com' not in real:
+                    links.append(real)
+            except Exception:
+                continue
         elif href.startswith('http') and 'yahoo' not in href and 'yimg' not in href:
             links.append(href)
 
@@ -264,22 +327,28 @@ async def search_startpage(query: str, max_results: int = 8) -> list:
 
 
 async def search_searxng(query: str, max_results: int = 10) -> list:
-    """SearXNG — meta-search aggregator (10+ engines)."""
+    """SearXNG — JSON validation added."""
     instances = [
+        "https://searx.tiekoetter.com",
         "https://searx.be",
         "https://priv.au",
-        "https://searx.tiekoetter.com",
         "https://search.brave4u.com",
         "https://searx.work",
     ]
     for instance in instances:
         try:
             url = f"{instance}/search?q={quote(query)}&format=json&language=en"
-            async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
                 resp = await client.get(url, headers=BROWSER_HEADERS)
                 if resp.status_code != 200:
                     continue
-                data = resp.json()
+                # ✅ Verify JSON content-type (302 redirects pe HTML aata hai)
+                if 'application/json' not in resp.headers.get('content-type', ''):
+                    continue
+                try:
+                    data = resp.json()
+                except Exception:
+                    continue
                 links = []
                 for r in data.get("results", [])[:max_results]:
                     link = r.get("url", "")
@@ -293,15 +362,20 @@ async def search_searxng(query: str, max_results: int = 10) -> list:
     logger.warning("All SearXNG instances failed")
     return []
 
-
 async def search_mojeek(query: str, max_results: int = 8) -> list:
-    """Mojeek — independent index, separate from Google/Bing."""
-    url = f"https://www.mojeek.com/search?q={quote(query)}"
+    """Mojeek with session warmup."""
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.get(url, headers=BROWSER_HEADERS)
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, http2=True) as client:
+            # ✅ Warmup: homepage visit karke cookies acquire karo
+            await client.get("https://www.mojeek.com/", headers=get_realistic_headers())
+            await asyncio.sleep(0.5)  # Human-like delay
+            
+            url = f"https://www.mojeek.com/search?q={quote(query)}"
+            resp = await client.get(url, headers=get_realistic_headers("https://www.mojeek.com/"))
             if resp.status_code != 200:
+                logger.debug(f"Mojeek status {resp.status_code}")
                 return []
+        
         soup = BeautifulSoup(resp.text, 'html.parser')
         links = []
         for a in soup.select('a.ob, h2 a[href^="http"], .results-standard a[href^="http"]'):
@@ -339,20 +413,15 @@ async def search_qwant(query: str, max_results: int = 8) -> list:
 
 
 async def search_ecosia(query: str, max_results: int = 8) -> list:
-    """Ecosia — eco-friendly, Bing-backed."""
-    url = f"https://www.ecosia.org/search?q={quote(query)}"
-
-    enhanced_headers = {
-        **BROWSER_HEADERS,
-        "Referer": "https://www.ecosia.org/",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Cache-Control": "max-age=0",
-    }
+    """Ecosia with session warmup."""
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.get(url, headers=BROWSER_HEADERS)
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, http2=True) as client:
+            # ✅ Warmup
+            await client.get("https://www.ecosia.org/", headers=get_realistic_headers())
+            await asyncio.sleep(0.5)
+            
+            url = f"https://www.ecosia.org/search?q={quote(query)}"
+            resp = await client.get(url, headers=get_realistic_headers("https://www.ecosia.org/"))
             if resp.status_code != 200:
                 return []
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -370,14 +439,265 @@ async def search_ecosia(query: str, max_results: int = 8) -> list:
     except Exception as e:
         logger.debug(f"Ecosia error: {e}")
         return []
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TIER 3: Yandex, Marginalia, You.com, Swisscows, Baidu
+# ════════════════════════════════════════════════════════════════════════════════
+
+async def search_yandex(query: str, max_results: int = 8) -> list:
+    """Yandex — independent Russian index, global coverage."""
+    url = f"https://yandex.com/search/?text={quote(query)}&lr=10393"
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                logger.warning(f"Yandex status {resp.status_code} — skip")
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('a.Link.OrganicTitle-Link, a.organic__url, h2 a[href^="http"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'yandex' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Yandex error: {e}")
+        return []
+
+
+async def search_marginalia(query: str, max_results: int = 8) -> list:
+    """Marginalia — independent UK crawler. Has public JSON API."""
+    url = f"https://api.marginalia.nu/public/search/{quote(query)}?count={max_results}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"Accept": "application/json"})
+            if resp.status_code != 200:
+                # Fallback to HTML scrape
+                url2 = f"https://search.marginalia.nu/search?query={quote(query)}"
+                resp = await client.get(url2, headers=BROWSER_HEADERS)
+                if resp.status_code != 200:
+                    return []
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                links = []
+                for a in soup.select('div.search-result a[href^="http"], h2 a[href^="http"]'):
+                    href = a.get('href', '')
+                    if href.startswith('http') and 'marginalia' not in href:
+                        links.append(href)
+                return list(dict.fromkeys(links))[:max_results]
+            data = resp.json()
+            links = [r.get("url", "") for r in data.get("results", [])
+                     if r.get("url", "").startswith("http")]
+            return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Marginalia error: {e}")
+        return []
+
+
+async def search_youcom(query: str, max_results: int = 8) -> list:
+    """You.com — AI-powered, scraping HTML."""
+    url = f"https://you.com/search?q={quote(query)}&tbm=youchat"
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('a[data-testid="web-result-title"], article a[href^="http"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'you.com' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"You.com error: {e}")
+        return []
+
+
+async def search_swisscows(query: str, max_results: int = 8) -> list:
+    """Swisscows — Swiss, family-friendly, partial own index."""
+    url = f"https://swisscows.com/en/web?query={quote(query)}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('article.web-result a.title, a[data-test-id="web-link"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'swisscows' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Swisscows error: {e}")
+        return []
+
+
+async def search_baidu(query: str, max_results: int = 8) -> list:
+    """Baidu — Chinese giant, English queries supported."""
+    url = f"https://www.baidu.com/s?wd={quote(query)}&rn={max_results}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        # Baidu uses redirect URLs — first try direct, then mu attribute
+        for h3 in soup.select('h3.t a, div.result a[href]'):
+            mu = h3.get('mu', '')  # ✅ original URL hidden in mu attribute
+            href = h3.get('href', '')
+            if mu and mu.startswith('http') and 'baidu' not in mu:
+                links.append(mu)
+            elif href.startswith('http') and 'baidu.com' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Baidu error: {e}")
+        return []
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TIER 4: Stract, Presearch, Metager, LibreX, Whoogle
+# ════════════════════════════════════════════════════════════════════════════════
+
+async def search_stract(query: str, max_results: int = 8) -> list:
+    """Stract — open-source independent crawler with JSON API."""
+    url = "https://stract.com/beta/api/search"
+    payload = {"query": query, "numResults": max_results}
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            resp = await client.post(url, json=payload,
+                                     headers={**BROWSER_HEADERS, "Content-Type": "application/json"})
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            links = []
+            for r in data.get("webpages", []):
+                link = r.get("url", "")
+                if link.startswith("http"):
+                    links.append(link)
+            return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Stract error: {e}")
+        return []
+
+
+async def search_presearch(query: str, max_results: int = 8) -> list:
+    """Presearch — decentralized search."""
+    url = f"https://presearch.com/search?q={quote(query)}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('a.result-link, div.result a[href^="http"], h3 a[href^="http"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'presearch' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Presearch error: {e}")
+        return []
+
+
+async def search_metager(query: str, max_results: int = 8) -> list:
+    """Metager — German meta-search."""
+    url = f"https://metager.org/meta/meta.ger3?eingabe={quote(query)}"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url, headers=BROWSER_HEADERS)
+            if resp.status_code != 200:
+                return []
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        links = []
+        for a in soup.select('h2.result-title a, a.result-link, div.result a[href^="http"]'):
+            href = a.get('href', '')
+            if href.startswith('http') and 'metager' not in href:
+                links.append(href)
+        return list(dict.fromkeys(links))[:max_results]
+    except Exception as e:
+        logger.debug(f"Metager error: {e}")
+        return []
+
+
+async def search_librex(query: str, max_results: int = 8) -> list:
+    """LibreX/LibreY — meta-search instances (try multiple)."""
+    instances = [
+        "https://search.davidovski.xyz",
+        "https://librex.beparanoid.de",
+        "https://lx.benike.me",
+        "https://librex.retrowave.dev",
+    ]
+    for instance in instances:
+        try:
+            url = f"{instance}/api.php?q={quote(query)}&p=0&t=0"
+            async with httpx.AsyncClient(timeout=6, follow_redirects=True) as client:
+                resp = await client.get(url, headers={**BROWSER_HEADERS, "Accept": "application/json"})
+                if resp.status_code != 200:
+                    continue
+                if 'application/json' not in resp.headers.get('content-type', ''):
+                    continue
+                try:
+                    data = resp.json()
+                except Exception:
+                    continue
+                links = []
+                for r in data[:max_results] if isinstance(data, list) else []:
+                    link = r.get("url", "")
+                    if link.startswith("http"):
+                        links.append(link)
+                if links:
+                    logger.info(f"✅ LibreX ({instance.split('//')[1]}): {len(links)} URLs")
+                    return list(dict.fromkeys(links))[:max_results]
+        except Exception:
+            continue
+    return []
+
+
+async def search_whoogle(query: str, max_results: int = 8) -> list:
+    """Whoogle — self-hosted Google proxy instances."""
+    instances = [
+        "https://whoogle.dcs0.hu",
+        "https://search.albony.xyz",
+        "https://whoogle.privacydev.net",
+        "https://whoogle.ssrvodka.fr",
+    ]
+    for instance in instances:
+        try:
+            url = f"{instance}/search?q={quote(query)}"
+            async with httpx.AsyncClient(timeout=6, follow_redirects=True) as client:
+                resp = await client.get(url, headers=BROWSER_HEADERS)
+                if resp.status_code != 200:
+                    continue
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            links = []
+            for a in soup.select('div.yuRUbf a[href^="http"], a[href^="http"][rel="noopener"]'):
+                href = a.get('href', '')
+                if href.startswith('http') and 'whoogle' not in href and instance.split('//')[1] not in href:
+                    links.append(href)
+            if links:
+                logger.info(f"✅ Whoogle ({instance.split('//')[1]}): {len(links)} URLs")
+                return list(dict.fromkeys(links))[:max_results]
+        except Exception:
+            continue
+    return []
+
     
 # ── Tiered Search Logic ────────────────────────────────────────────────────────
 
 async def get_urls_tiered(q: str, min_required: int = 5) -> list:
     """
-    Tier 1: Google, DuckDuckGo, Yahoo, Brave, Bing (parallel)
-    Tier 2: Startpage, SearXNG, Mojeek, Qwant, Ecosia (only if Tier 1 weak)
+    Tier 1: Google, DuckDuckGo, Yahoo, Brave, Bing
+    Tier 2: Startpage, SearXNG, Mojeek, Qwant, Ecosia
+    Tier 3: Yandex, Marginalia, You.com, Swisscows, Baidu
+    Tier 4: Stract, Presearch, Metager, LibreX, Whoogle
     """
+    # ✅ Pehle Selenium health check
+    await restart_selenium_if_needed()
+    
     all_urls = []
     seen = set()
     
@@ -389,81 +709,210 @@ async def get_urls_tiered(q: str, min_required: int = 5) -> list:
     
     # ── TIER 1 ──
     logger.info("🎯 TIER 1: Google, DuckDuckGo, Yahoo, Brave, Bing")
-    tier1 = await asyncio.gather(
-        safe_search("Google",     search_google(q, 10), timeout=25),
-        safe_search("DuckDuckGo", search_ddg(q, 8),     timeout=20),
-        safe_search("Yahoo",      search_yahoo(q, 8),   timeout=15),
-        safe_search("Brave",      search_brave(q, 8),   timeout=20),
-        safe_search("Bing",       search_bing(q, 10),   timeout=25),
+    
+    # ✅ httpx engines parallel
+    httpx_results = await asyncio.gather(
+        safe_search("DuckDuckGo", search_ddg(q, 8),   timeout=15),
+        safe_search("Yahoo",      search_yahoo(q, 8), timeout=12),
     )
-    for urls in tier1:
+    for urls in httpx_results:
         add_urls(urls)
+    
+    # ✅ Selenium engines SEQUENTIAL (shared driver, no parallel deadlock)
+    if len(all_urls) < min_required:
+        for name, search_fn, tmout in [
+            ("Google", search_google, 20),
+            ("Bing",   search_bing,   20),
+            ("Brave",  search_brave,  18),
+        ]:
+            urls = await safe_search(name, search_fn(q, 10), timeout=tmout)
+            add_urls(urls)
+            if len(all_urls) >= min_required:
+                break  # enough mil gaya, baaki skip
     
     if len(all_urls) >= min_required:
         logger.info(f"✅ Tier 1 sufficient: {len(all_urls)} URLs")
         return all_urls
     
     # ── TIER 2 ──
-    logger.warning(f"⚠️ Tier 1 weak ({len(all_urls)} URLs) — trying Tier 2")
+    logger.warning(f"⚠️ Tier 1 weak ({len(all_urls)}) — Tier 2")
     tier2 = await asyncio.gather(
-        safe_search("Startpage", search_startpage(q, 8), timeout=15),
-        safe_search("SearXNG",   search_searxng(q, 10),  timeout=20),
-        safe_search("Mojeek",    search_mojeek(q, 8),    timeout=15),
-        safe_search("Qwant",     search_qwant(q, 8),     timeout=15),
-        safe_search("Ecosia",    search_ecosia(q, 8),    timeout=15),
+        safe_search("Startpage", search_startpage(q, 8), timeout=12),
+        safe_search("SearXNG",   search_searxng(q, 10),  timeout=15),
+        safe_search("Mojeek",    search_mojeek(q, 8),    timeout=12),
+        safe_search("Qwant",     search_qwant(q, 8),     timeout=12),
+        safe_search("Ecosia",    search_ecosia(q, 8),    timeout=12),
     )
     for urls in tier2:
         add_urls(urls)
     
-    logger.info(f"🏁 Final from all tiers: {len(all_urls)} URLs")
+    if len(all_urls) >= min_required:
+        logger.info(f"✅ Tier 2 sufficient: {len(all_urls)} URLs")
+        return all_urls
+    
+    # ── TIER 3 ──
+    logger.warning(f"⚠️ Tier 2 weak ({len(all_urls)}) — Tier 3: Yandex, Marginalia, You.com, Swisscows, Baidu")
+    tier3 = await asyncio.gather(
+        safe_search("Yandex",     search_yandex(q, 8),     timeout=12),
+        safe_search("Marginalia", search_marginalia(q, 8), timeout=10),
+        safe_search("You.com",    search_youcom(q, 8),     timeout=12),
+        safe_search("Swisscows",  search_swisscows(q, 8),  timeout=10),
+        safe_search("Baidu",      search_baidu(q, 8),      timeout=10),
+    )
+    for urls in tier3:
+        add_urls(urls)
+    
+    if len(all_urls) >= min_required:
+        logger.info(f"✅ Tier 3 sufficient: {len(all_urls)} URLs")
+        return all_urls
+    
+    # ── TIER 4 ──
+    logger.warning(f"⚠️ Tier 3 weak ({len(all_urls)}) — Tier 4: Stract, Presearch, Metager, LibreX, Whoogle")
+    tier4 = await asyncio.gather(
+        safe_search("Stract",    search_stract(q, 8),    timeout=8),
+        safe_search("Presearch", search_presearch(q, 8), timeout=10),
+        safe_search("Metager",   search_metager(q, 8),   timeout=10),
+        safe_search("LibreX",    search_librex(q, 8),    timeout=8),
+        safe_search("Whoogle",   search_whoogle(q, 8),   timeout=8),
+    )
+    for urls in tier4:
+        add_urls(urls)
+    
+    logger.info(f"🏁 Final from all 4 tiers: {len(all_urls)} URLs")
     return all_urls
 # ── LLM (Gemma) ──────────────────────────────────────────────────────────
-async def ask_llm(prompt: str):
+async def ask_llm(prompt: str, max_retries: int = 4):
+    """
+    LLM call with auto-retry (4 attempts).
+    Backoff: 1s → 2s → 4s → 8s between retries.
+    Streams tokens normally on success.
+    ✅ Continues from partial response on connection errors (no duplication).
+    """
     base_url = os.getenv("LLM_BASE_URL", "https://gemma4.limeox.org/v1/chat/completions")
     model    = os.getenv("LLM_MODEL", "gemma4")
-    logger.info(f"🤖 Gemma call → {base_url}")
+    
+    accumulated_content = ""  # Track partial response for continuation
+    is_continuation = False     # Flag to know if we're continuing
 
-    json_data = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": True,
-        "max_tokens": 1200,
-        "temperature": 0.4,
-    }
     headers = {"Content-Type": "application/json", "User-Agent": "ResearchBot/1.0"}
 
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            resp = await client.post(base_url, json=json_data, headers=headers)
-            logger.info(f"📡 LLM status: {resp.status_code}")
-            if resp.status_code != 200:
-                yield f"Error: LLM status {resp.status_code}. try again."
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"🤖 LLM attempt {attempt}/{max_retries} → {base_url}")
+        token_count = 0
+        got_any_token = False
+
+        # Build prompt - use continuation prompt if we have partial content
+        if is_continuation and accumulated_content:
+            current_prompt = (
+                f"Continue from EXACTLY where you left off. "
+                f"Do NOT repeat anything already written. "
+                f"Just continue the answer:\n\n"
+                f"{accumulated_content}"
+            )
+        else:
+            current_prompt = prompt
+
+        json_data = {
+            "model": model,
+            "messages": [{"role": "user", "content": current_prompt}],
+            "stream": True,
+            "max_tokens": 1200,
+            "temperature": 0.4,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                async with client.stream("POST", base_url, json=json_data, headers=headers) as resp:
+                    logger.info(f"📡 LLM status: {resp.status_code}")
+                    
+                    # ❌ HTTP error → retry
+                    if resp.status_code != 200:
+                        last_error = f"HTTP {resp.status_code}"
+                        logger.warning(f"⚠️ LLM attempt {attempt} failed: {last_error}")
+                        if attempt < max_retries:
+                            wait = 2 ** (attempt - 1)  # 1s, 2s, 4s, 8s
+                            logger.info(f"⏳ Retrying in {wait}s...")
+                            await asyncio.sleep(wait)
+                            continue
+                        else:
+                            yield f"\n\n[Error: LLM failed after {max_retries} attempts (last: {last_error})]"
+                            return
+
+                    # ✅ Stream tokens
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data == "[DONE]":
+                                logger.info(f"✅ LLM done — {token_count} tokens (attempt {attempt})")
+                                return  # ✅ success, exit retry loop
+                            try:
+                                chunk = json.loads(data)
+                                token = chunk['choices'][0]['delta'].get('content', '')
+                                if token:
+                                    token_count += 1
+                                    got_any_token = True
+                                    accumulated_content += token  # Track for continuation
+                                    yield token
+                            except Exception as e:
+                                logger.warning(f"⚠️ Parse error: {e}")
+                                continue
+
+                    # Stream ended without [DONE] but we got tokens → treat as success
+                    if got_any_token:
+                        logger.info(f"✅ LLM stream ended — {token_count} tokens (attempt {attempt})")
+                        return
+
+                    # Stream ended with NO tokens → retry
+                    last_error = "Empty response"
+                    logger.warning(f"⚠️ LLM attempt {attempt}: empty stream")
+
+        except httpx.TimeoutException:
+            last_error = "Timeout"
+            logger.warning(f"⏱️ LLM attempt {attempt}: timeout")
+        except httpx.ConnectError as e:
+            last_error = f"Connection error: {e}"
+            logger.warning(f"🔌 LLM attempt {attempt}: connection failed")
+        except httpx.RemoteProtocolError as e:
+            # ✅ Connection dropped mid-stream - try to continue
+            last_error = f"RemoteProtocolError: {e}"
+            logger.warning(f"🔌 LLM attempt {attempt}: connection dropped mid-stream")
+            
+            if got_any_token and accumulated_content:
+                # Mark as continuation for next attempt
+                is_continuation = True
+                logger.info(f"🔄 Will continue from {len(accumulated_content)} chars...")
+                # Continue to retry loop (don't return, let it retry with continuation prompt)
+            else:
+                logger.warning(f"❌ No partial content to continue from")
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+            logger.warning(f"❌ LLM attempt {attempt}: {last_error}")
+
+        # ⚠️ Non-continuation errors with partial content → can't safely retry
+        if got_any_token and not isinstance(last_error, str) or "RemoteProtocolError" not in last_error:
+            if got_any_token:
+                logger.warning(f"⚠️ Partial response received with non-recoverable error — not retrying")
+                yield f"\n\n[Connection lost. Partial response saved.]"
                 return
 
-            token_count = 0
-            async for line in resp.aiter_lines():
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        logger.info(f"✅ LLM done — {token_count} tokens")
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        token = chunk['choices'][0]['delta'].get('content', '')
-                        if token:
-                            token_count += 1
-                            yield token
-                    except Exception as e:
-                        logger.warning(f"⚠️ Parse: {e}")
-                        continue
+        # Retry with backoff (for non-RemoteProtocolError OR if we have content to continue)
+        if attempt < max_retries:
+            wait = 2 ** (attempt - 1)  # 1s, 2s, 4s, 8s
+            logger.info(f"⏳ Retrying in {wait}s...")
+            await asyncio.sleep(wait)
+        else:
+            # Max retries with partial content
+            if accumulated_content:
+                yield f"\n\n[Error: Connection lost after multiple attempts. Response may be incomplete.]"
+            return
 
-            if token_count == 0:
-                yield "Error: LLM se koi response nahi aaya. Dobara try karein."
-
-    except httpx.TimeoutException:
-        yield "Error: LLM timeout Try again"
-    except Exception as e:
-        yield f"Error: {e}"
+    # All retries exhausted
+    if accumulated_content:
+        yield f"\n\n[Error: LLM failed after {max_retries} attempts. Last error: {last_error}]"
+    else:
+        yield f"Error: LLM failed after {max_retries} attempts. Last error: {last_error}"
 
 
 # ── Prompt ─────────────────────────────────────────────────────────────────────
