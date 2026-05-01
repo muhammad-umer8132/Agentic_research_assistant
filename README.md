@@ -506,4 +506,4 @@ MIT License - feel free to use for personal or commercial projects.
 
 ---
 
-**Made with ❤️ by Muhammad Umer**
+**Made with ❤️ by [Muhammad Umer](https://www.linkedin.com/in/muhammad-umer-154605173/)**

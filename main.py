@@ -959,7 +959,7 @@ async def search_endpoint(q: str = Query(...)):
 
     # 2. Tiered search (10 engines total)
     all_urls = await get_urls_tiered(q, min_required=5)
-    urls = all_urls[:8]
+    urls = all_urls[:10]
     logger.info(f"🔗 Unique URLs to scrape: {len(urls)}")
 
     # 3. Saare engines fail — graceful error
